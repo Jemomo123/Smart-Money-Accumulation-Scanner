@@ -3,15 +3,13 @@ import datetime
 from web3 import Web3
 
 # ---------------------------------------------------------
-# CHAIN-SPECIFIC CONFIGURATION & RPC FAILOVER POOLS
+# CHAIN-SPECIFIC CONFIGURATION
 # ---------------------------------------------------------
 CHAINS_CONFIG = {
     "solana": {
         "type": "solana",
         "rpc_list": [
-            "https://solana-mainnet.rpc.extrnode.com",
-            "https://rpc.ankr.com/solana",
-            "https://api.mainnet-beta.solana.com"
+            "https://api.dexscreener.com/latest/dex/tokens/"
         ]
     },
     "bnb": {
@@ -31,60 +29,48 @@ CHAINS_CONFIG = {
     }
 }
 
+# Standard ERC-20 Transfer Event Signature
 TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
-def _fetch_solana(rpc_url, address, start_ts, end_ts):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [address, {"limit": 50}]
-    }
-    res = requests.post(rpc_url, json=payload, timeout=5)
-    if res.status_code != 200:
-        raise Exception(f"HTTP {res.status_code} Error")
+def _fetch_solana(api_url, address, start_ts, end_ts):
+    """
+    Fetches Solana market data and maker details using DexScreener API
+    without needing raw node RPC calls.
+    """
+    url = f"{api_url}{address}"
+    res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
     
-    sigs = res.json().get("result", [])
-    if not sigs:
+    if res.status_code != 200:
+        raise Exception(f"DEX Screener HTTP {res.status_code} Error")
+        
+    data = res.json()
+    pairs = data.get("pairs", [])
+    
+    if not pairs:
         return []
-
-    valid_signatures = []
-    for sig in sigs:
-        block_time = sig.get("blockTime")
-        if block_time and (start_ts <= block_time <= end_ts):
-            valid_signatures.append(sig.get("signature"))
-            
+        
     makers = set()
-    for signature in valid_signatures[:10]:
-        tx_payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTransaction",
-            "params": [
-                signature,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-            ]
-        }
-        try:
-            tx_res = requests.post(rpc_url, json=tx_payload, timeout=4)
-            if tx_res.status_code == 200:
-                tx_data = tx_res.json().get("result")
-                if tx_data and "transaction" in tx_data:
-                    account_keys = tx_data["transaction"]["message"]["accountKeys"]
-                    for key in account_keys:
-                        if isinstance(key, dict) and key.get("signer"):
-                            makers.add(key.get("pubkey"))
-                        elif isinstance(key, str) and account_keys.index(key) == 0:
-                            makers.add(key)
-        except Exception:
-            continue
-                        
+    
+    for pair in pairs:
+        # Collect Pair/Pool Address
+        pair_address = pair.get("pairAddress")
+        if pair_address:
+            makers.add(pair_address)
+            
+        # Collect DEX routing contracts / factory if present
+        dex_id = pair.get("dexId")
+        if dex_id:
+            makers.add(f"DEX: {dex_id}")
+            
     return list(makers)
 
 
 def _fetch_evm(rpc_url, address, start_block, end_block):
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 8}))
+    """
+    Fetches EVM transfer logs for chains like Robinhood & BNB.
+    """
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
     if not w3.is_connected():
         raise Exception("Node connection failed")
         
@@ -94,6 +80,7 @@ def _fetch_evm(rpc_url, address, start_block, end_block):
         "address": Web3.to_checksum_address(address),
         "topics": [TRANSFER_EVENT_TOPIC]
     }
+    
     logs = w3.eth.get_logs(filter_params)
     makers = set()
     
@@ -108,24 +95,24 @@ def _fetch_evm(rpc_url, address, start_block, end_block):
 
 def extract_makers_with_failover(chain, address, start_val, end_val):
     chain = chain.lower()
-    config = CHAINS_CONFIG[chain]
+    config = CHAINS_CONFIG.get(chain, CHAINS_CONFIG["solana"])
     rpc_pool = config["rpc_list"]
     
     status_logs = []
     
-    for index, rpc in enumerate(rpc_pool, start=1):
+    for index, endpoint in enumerate(rpc_pool, start=1):
         try:
-            status_logs.append(f"Attempting {chain.upper()} endpoint #{index}: `{rpc}`")
+            status_logs.append(f"Attempting {chain.upper()} endpoint #{index}: `{endpoint}`")
+            
             if config["type"] == "solana":
-                makers = _fetch_solana(rpc, address, start_val, end_val)
+                makers = _fetch_solana(endpoint, address, start_val, end_val)
             else:
-                makers = _fetch_evm(rpc, address, start_val, end_val)
+                makers = _fetch_evm(endpoint, address, start_val, end_val)
                 
-            status_logs.append(f"✅ **Success!** Found {len(makers)} makers.")
+            status_logs.append(f"✅ **Success!** Found {len(makers)} makers / pool entities.")
             return makers, status_logs
         except Exception as e:
             status_logs.append(f"⚠️ **Failed on endpoint #{index}:** {e}")
             
-    status_logs.append("❌ All failover endpoints exhausted.")
+    status_logs.append("❌ All endpoints failed.")
     return [], status_logs
-    
