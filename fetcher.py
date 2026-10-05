@@ -9,9 +9,9 @@ CHAINS_CONFIG = {
     "solana": {
         "type": "solana",
         "rpc_list": [
-            "https://api.mainnet-beta.solana.com",
+            "https://solana-mainnet.rpc.extrnode.com",
             "https://rpc.ankr.com/solana",
-            "https://solana-mainnet.rpc.extrnode.com"
+            "https://api.mainnet-beta.solana.com"
         ]
     },
     "bnb": {
@@ -31,7 +31,6 @@ CHAINS_CONFIG = {
     }
 }
 
-# Standard ERC-20 Transfer Event Signature: Transfer(address,address,uint256)
 TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
@@ -40,23 +39,24 @@ def _fetch_solana(rpc_url, address, start_ts, end_ts):
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getSignaturesForAddress",
-        "params": [address, {"limit": 100}]
+        "params": [address, {"limit": 50}]
     }
-    res = requests.post(rpc_url, json=payload, timeout=10)
+    res = requests.post(rpc_url, json=payload, timeout=5)
     if res.status_code != 200:
         raise Exception(f"HTTP {res.status_code} Error")
     
     sigs = res.json().get("result", [])
+    if not sigs:
+        return []
+
     valid_signatures = []
-    
     for sig in sigs:
         block_time = sig.get("blockTime")
         if block_time and (start_ts <= block_time <= end_ts):
             valid_signatures.append(sig.get("signature"))
             
     makers = set()
-    
-    for signature in valid_signatures[:20]:
+    for signature in valid_signatures[:10]:
         tx_payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -66,26 +66,28 @@ def _fetch_solana(rpc_url, address, start_ts, end_ts):
                 {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
             ]
         }
-        tx_res = requests.post(rpc_url, json=tx_payload, timeout=10)
-        if tx_res.status_code == 200:
-            tx_data = tx_res.json().get("result")
-            if tx_data and "transaction" in tx_data:
-                account_keys = tx_data["transaction"]["message"]["accountKeys"]
-                for key in account_keys:
-                    if isinstance(key, dict) and key.get("signer"):
-                        makers.add(key.get("pubkey"))
-                    elif isinstance(key, str) and account_keys.index(key) == 0:
-                        makers.add(key)
+        try:
+            tx_res = requests.post(rpc_url, json=tx_payload, timeout=4)
+            if tx_res.status_code == 200:
+                tx_data = tx_res.json().get("result")
+                if tx_data and "transaction" in tx_data:
+                    account_keys = tx_data["transaction"]["message"]["accountKeys"]
+                    for key in account_keys:
+                        if isinstance(key, dict) and key.get("signer"):
+                            makers.add(key.get("pubkey"))
+                        elif isinstance(key, str) and account_keys.index(key) == 0:
+                            makers.add(key)
+        except Exception:
+            continue
                         
     return list(makers)
 
 
 def _fetch_evm(rpc_url, address, start_block, end_block):
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 8}))
     if not w3.is_connected():
         raise Exception("Node connection failed")
         
-    # Fetch Transfer logs directly from the token contract
     filter_params = {
         "fromBlock": hex(int(start_block)),
         "toBlock": hex(int(end_block)),
@@ -96,10 +98,8 @@ def _fetch_evm(rpc_url, address, start_block, end_block):
     makers = set()
     
     for log in logs:
-        # Extract recipient ('to' address) from topic 2 in the Transfer event
         if len(log['topics']) >= 3:
             raw_to_address = log['topics'][2].hex()
-            # Convert 32-byte topic padded hex to standard 20-byte EVM address
             recipient = Web3.to_checksum_address("0x" + raw_to_address[-40:])
             makers.add(recipient)
             
