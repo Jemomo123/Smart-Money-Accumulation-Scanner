@@ -31,7 +31,8 @@ CHAINS_CONFIG = {
     }
 }
 
-SWAP_EVENT_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+# Standard ERC-20 Transfer Event Signature: Transfer(address,address,uint256)
+TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
 def _fetch_solana(rpc_url, address, start_ts, end_ts):
@@ -55,7 +56,6 @@ def _fetch_solana(rpc_url, address, start_ts, end_ts):
             
     makers = set()
     
-    # Parse top matching signatures to extract buyer/signer wallet addresses
     for signature in valid_signatures[:20]:
         tx_payload = {
             "jsonrpc": "2.0",
@@ -85,17 +85,24 @@ def _fetch_evm(rpc_url, address, start_block, end_block):
     if not w3.is_connected():
         raise Exception("Node connection failed")
         
+    # Fetch Transfer logs directly from the token contract
     filter_params = {
         "fromBlock": hex(int(start_block)),
         "toBlock": hex(int(end_block)),
         "address": Web3.to_checksum_address(address),
-        "topics": [SWAP_EVENT_TOPIC]
+        "topics": [TRANSFER_EVENT_TOPIC]
     }
     logs = w3.eth.get_logs(filter_params)
     makers = set()
+    
     for log in logs:
-        tx = w3.eth.get_transaction(log['transactionHash'])
-        makers.add(tx['from'])
+        # Extract recipient ('to' address) from topic 2 in the Transfer event
+        if len(log['topics']) >= 3:
+            raw_to_address = log['topics'][2].hex()
+            # Convert 32-byte topic padded hex to standard 20-byte EVM address
+            recipient = Web3.to_checksum_address("0x" + raw_to_address[-40:])
+            makers.add(recipient)
+            
     return list(makers)
 
 
@@ -121,3 +128,4 @@ def extract_makers_with_failover(chain, address, start_val, end_val):
             
     status_logs.append("❌ All failover endpoints exhausted.")
     return [], status_logs
+    
